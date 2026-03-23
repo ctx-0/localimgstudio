@@ -1,0 +1,2 @@
+- [x] review available `rembg` models
+- [x] consider official realesrgan implementation

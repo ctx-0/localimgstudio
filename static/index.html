@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalImg Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=5" />
+</head>
+<body>
+
+  <div id="top-bar"></div>
+
+  <!-- Header -->
+  <header class="site-header">
+    <div class="brand">LocalImg<span>Studio</span></div>
+    <div class="header-actions">
+      <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+        <svg class="sun-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/>
+          <line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+        <svg class="moon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+      <div class="device-badge" id="device-badge">...</div>
+      <div class="status-dot" id="status-dot"></div>
+    </div>
+  </header>
+
+  <!-- Main Workspace -->
+  <main class="workspace">
+    
+    <!-- Empty State -->
+    <div class="empty-state" id="empty-state">
+      <div class="upload-box">
+        <div class="upload-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M12 15V3m0 0L8 7m4-4 4 4"/>
+            <path d="M2 17.5v.5a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-.5"/>
+          </svg>
+        </div>
+        <p class="upload-text">Drop image or click to browse</p>
+        <p class="upload-hint">PNG, JPG, WEBP</p>
+      </div>
+      <input type="file" id="file-input" accept="image/*" hidden />
+    </div>
+
+    <!-- Preview Area -->
+    <div class="preview-stage" id="preview-stage" hidden>
+      <div class="canvas-wrapper">
+        <div class="split-view" id="split-view">
+          <img class="view-sizer" id="img-sizer" alt="" />
+          <div class="view-layer original">
+            <img id="img-original" alt="original" />
+          </div>
+          <div class="view-layer result">
+            <img id="img-result" alt="result" />
+          </div>
+          <div class="split-bar" id="split-bar">
+            <div class="split-thumb">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 12H3"/><polyline points="6 9 3 12 6 15"/>
+                <path d="M16 12h5"/><polyline points="18 9 21 12 18 15"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+        
+        <div class="loading-layer" id="loading-layer" hidden>
+          <div class="spinner"></div>
+          <span>Processing</span>
+        </div>
+      </div>
+      <div class="image-info">
+        <span id="info-dims">— × —</span>
+        <span class="info-sep">·</span>
+        <span id="info-time">—</span>
+      </div>
+    </div>
+
+    <!-- Floating Control Bar -->
+    <div class="control-dock" id="control-dock">
+
+      <!-- Upload -->
+      <button class="dock-btn icon" id="upload-btn" title="Upload image">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </button>
+
+      <div class="dock-divider"></div>
+
+      <!-- Mode -->
+      <div class="mode-switch">
+        <button class="switch-btn active" data-mode="rembg">Remove BG</button>
+        <button class="switch-btn" data-mode="upscale">Upscale</button>
+      </div>
+
+      <div class="dock-divider"></div>
+
+      <!-- Model -->
+      <div class="model-group" id="bg-model-group">
+        <select class="dock-select" id="bg-model"></select>
+        <button class="model-load-btn" id="btn-load-bg" title="Load model">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11m0 0l-4-4m4 4l4-4"/><path d="M5 19h14"/></svg>
+        </button>
+      </div>
+
+      <div class="model-group" id="up-model-group" hidden>
+        <select class="dock-select" id="up-model">
+          <option value="realesrgan-x4">RealESRGAN 4x</option>
+          <option value="realesrgan-x2">RealESRGAN 2x</option>
+          <option value="realesrgan-x4-anime">RealESRGAN Anime</option>
+        </select>
+        <button class="model-load-btn" id="btn-load-up" title="Download model">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11m0 0l-4-4m4 4l4-4"/><path d="M5 19h14"/></svg>
+        </button>
+      </div>
+
+      <div class="dock-divider"></div>
+
+      <!-- Process + Download -->
+      <button class="dock-btn primary" id="btn-run" disabled>
+        <span>Process</span>
+      </button>
+
+      <button class="dock-btn icon" id="btn-download" title="Save" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </svg>
+      </button>
+
+    </div>
+
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="app.js?v=5"></script>
+</body>
+</html>

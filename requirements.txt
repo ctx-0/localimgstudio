@@ -1,0 +1,8 @@
+fastapi==0.135.1
+uvicorn[standard]==0.41.0
+python-multipart==0.0.22
+Pillow==12.1.1
+rembg[gpu]==2.0.72
+spandrel==0.4.2
+torch==2.10.0
+torchvision==0.25.0
