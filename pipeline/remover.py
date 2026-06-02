@@ -1,8 +1,14 @@
+import gc
 import os
 from typing import Any
 from io import BytesIO
 from PIL import Image
 from rembg import remove, new_session
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 _sessions: dict[str, Any] = {}
 
@@ -17,6 +23,22 @@ MODEL_LIST = [
 MODELS = {m["id"]: m["id"] for m in MODEL_LIST}
 
 _CACHE_DIR = os.path.expanduser("~/.u2net")
+
+
+def _clear_cuda_cache() -> None:
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+        except RuntimeError:
+            pass
+
+
+def release_sessions() -> None:
+    _sessions.clear()
+    _clear_cuda_cache()
 
 
 def _get_session(model: str):
@@ -55,9 +77,14 @@ def preload_model(model: str) -> str:
 def remove_background(image_bytes: bytes, model: str = "birefnet-general") -> bytes:
     if model not in MODELS:
         raise ValueError(f"Unknown model: {model}. Choose from: {list(MODELS)}")
-    session = _get_session(MODELS[model])
-    img = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    result = remove(img, session=session)
-    out = BytesIO()
-    result.save(out, format="PNG")
-    return out.getvalue()
+    session = None
+    try:
+        session = _get_session(MODELS[model])
+        img = Image.open(BytesIO(image_bytes)).convert("RGBA")
+        result = remove(img, session=session)
+        out = BytesIO()
+        result.save(out, format="PNG")
+        return out.getvalue()
+    finally:
+        del session
+        release_sessions()

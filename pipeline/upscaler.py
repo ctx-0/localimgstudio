@@ -1,3 +1,4 @@
+import gc
 import os
 from io import BytesIO
 from typing import Callable
@@ -23,6 +24,22 @@ DOWNLOAD_URLS = {
 }
 
 _loaded: dict = {}
+
+
+def _clear_cuda_cache() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+        except RuntimeError:
+            pass
+
+
+def release_models() -> None:
+    _loaded.clear()
+    _clear_cuda_cache()
 
 
 def list_available() -> list[str]:
@@ -80,28 +97,61 @@ def _load_model(name: str):
     return model
 
 
-TILE_SIZE = 512  # safe for ~4 GB VRAM; each tile processed independently
+TILE_SIZE = 512
+MIN_TILE_SIZE = 128
 
 
 def _detect_scale(net, c: int, device) -> int:
-    with torch.no_grad():
+    with torch.inference_mode():
         probe = net(torch.zeros(1, c, 4, 4, device=device))
-    return probe.shape[-1] // 4
+    scale = probe.shape[-1] // 4
+    del probe
+    _clear_cuda_cache()
+    return scale
 
 
-def _upscale_tiled(net, tensor: torch.Tensor, scale: int, device) -> torch.Tensor:
-    """Upscale by processing TILE_SIZE×TILE_SIZE patches to avoid OOM."""
+def _upscale_tiled(
+    net,
+    tensor: torch.Tensor,
+    scale: int,
+    device,
+    tile_size: int,
+) -> torch.Tensor:
+    """Upscale patches on GPU, then copy each patch result back to CPU."""
     b, c, h, w = tensor.shape
     tensor = tensor.to(device)
-    out = torch.zeros(b, c, h * scale, w * scale, device=device)
-    for y in range(0, h, TILE_SIZE):
-        for x in range(0, w, TILE_SIZE):
-            patch = tensor[:, :, y : y + TILE_SIZE, x : x + TILE_SIZE]
-            with torch.no_grad():
-                patch_out = net(patch)
-            y2, x2 = min(y + TILE_SIZE, h), min(x + TILE_SIZE, w)
-            out[:, :, y * scale : y2 * scale, x * scale : x2 * scale] = patch_out
-    return out.cpu()
+    out = torch.zeros(b, c, h * scale, w * scale, device="cpu")
+    try:
+        for y in range(0, h, tile_size):
+            for x in range(0, w, tile_size):
+                patch = tensor[:, :, y : y + tile_size, x : x + tile_size]
+                with torch.inference_mode():
+                    patch_out = net(patch)
+                y2, x2 = min(y + tile_size, h), min(x + tile_size, w)
+                out[:, :, y * scale : y2 * scale, x * scale : x2 * scale] = patch_out.cpu()
+                del patch, patch_out
+                _clear_cuda_cache()
+    finally:
+        del tensor
+        _clear_cuda_cache()
+    return out
+
+
+def _upscale_tiled_with_retry(net, tensor: torch.Tensor, scale: int, device) -> torch.Tensor:
+    tile_size = TILE_SIZE
+    while True:
+        try:
+            return _upscale_tiled(net, tensor, scale, device, tile_size)
+        except torch.cuda.OutOfMemoryError:
+            _clear_cuda_cache()
+            if tile_size <= MIN_TILE_SIZE:
+                raise
+            tile_size //= 2
+        except RuntimeError as e:
+            if "CUDA out of memory" not in str(e) or tile_size <= MIN_TILE_SIZE:
+                raise
+            _clear_cuda_cache()
+            tile_size //= 2
 
 
 def upscale(image_bytes: bytes, model: str = "realesrgan-x4") -> bytes:
@@ -109,22 +159,27 @@ def upscale(image_bytes: bytes, model: str = "realesrgan-x4") -> bytes:
     if model not in MODELS:
         raise ValueError(f"Unknown model: {model}. Choose from: {list(MODELS)}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    net = _load_model(model)
+    net = None
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        net = _load_model(model)
 
-    img = Image.open(BytesIO(image_bytes))
-    has_alpha = img.mode == "RGBA"
-    rgb = img.convert("RGB")
+        img = Image.open(BytesIO(image_bytes))
+        has_alpha = img.mode == "RGBA"
+        rgb = img.convert("RGB")
 
-    tensor = TF.to_tensor(rgb).unsqueeze(0)
-    scale = _detect_scale(net, tensor.shape[1], device)
-    out_tensor = _upscale_tiled(net, tensor, scale, device)
-    out_img = TF.to_pil_image(out_tensor.squeeze(0).clamp(0, 1))
+        tensor = TF.to_tensor(rgb).unsqueeze(0)
+        scale = _detect_scale(net, tensor.shape[1], device)
+        out_tensor = _upscale_tiled_with_retry(net, tensor, scale, device)
+        out_img = TF.to_pil_image(out_tensor.squeeze(0).clamp(0, 1))
 
-    if has_alpha:
-        alpha = img.split()[3].resize(out_img.size, Image.BICUBIC)
-        out_img.putalpha(alpha)
+        if has_alpha:
+            alpha = img.split()[3].resize(out_img.size, Image.BICUBIC)
+            out_img.putalpha(alpha)
 
-    buf = BytesIO()
-    out_img.save(buf, format="PNG")
-    return buf.getvalue()
+        buf = BytesIO()
+        out_img.save(buf, format="PNG")
+        return buf.getvalue()
+    finally:
+        del net
+        release_models()
