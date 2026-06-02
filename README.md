@@ -8,11 +8,17 @@ Local image processing pipeline for background removal and upscaling.
 
 ## Setup
 
+Install dependencies with `uv`:
+
+```bash
+uv venv --clear --python 3.13
+uv sync
+```
 
 ### Run
 
 ```bash
-uvicorn main:app --reload --port 8000
+uv run uvicorn main:app --reload --port 8000
 ```
 
 Open http://localhost:8000 in your browser.
