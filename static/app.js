@@ -52,6 +52,10 @@ let resultBlob = null;
 const bgState = {};
 const upState = {};
 let isDragging = false;
+let currentRunId = 0;
+let activeProcessController = null;
+let originalObjectUrl = null;
+let resultObjectUrl = null;
 
 // ─── Init ───────────────────────────────────────────────────────────────────
 
@@ -66,7 +70,7 @@ async function fetchDevice() {
   try {
     const r = await fetch(`${API}/device`);
     if (!r.ok) return;
-    const d = await r.json();
+    const d = await readJsonResponse(r);
     deviceBadge.textContent = d.gpu ? 'GPU' : 'CPU';
     deviceBadge.className = 'device-badge ' + (d.gpu ? 'gpu' : 'cpu');
   } catch { deviceBadge.textContent = ''; }
@@ -76,15 +80,19 @@ async function fetchModels() {
   try {
     const r = await fetch(`${API}/models`);
     if (!r.ok) return;
-    const data = await r.json();
+    const data = await readJsonResponse(r);
+    if (!Array.isArray(data.bg_models)) return;
 
-    // Populate BG model select from backend list
-    bgModelSel.innerHTML = data.bg_models
-      .map(m => `<option value="${m.id}">${m.label}</option>`)
-      .join('');
+    // Populate BG model select from backend list.
+    bgModelSel.replaceChildren(...data.bg_models.map(m => {
+      const option = document.createElement('option');
+      option.value = m.id;
+      option.textContent = m.label;
+      return option;
+    }));
 
-    Object.assign(bgState, data.bg_removal);
-    Object.assign(upState, data.upscaling);
+    Object.assign(bgState, data.bg_removal || {});
+    Object.assign(upState, data.upscaling || {});
     refreshBgStatus();
     refreshUpStatus();
   } catch (e) { console.warn('fetchModels failed', e); }
@@ -95,6 +103,24 @@ async function checkHealth() {
     const r = await fetch(`${API}/health`);
     statusDot.className = r.ok ? 'status-dot online' : 'status-dot offline';
   } catch { statusDot.className = 'status-dot offline'; }
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+function readStreamMessage(event) {
+  try {
+    return JSON.parse(event.data);
+  } catch {
+    return { phase: 'error', msg: 'Invalid server message' };
+  }
 }
 
 // ─── Split View ─────────────────────────────────────────────────────────────
@@ -113,9 +139,7 @@ function initSplitView() {
     const rect = splitView.getBoundingClientRect();
     let x = e.clientX - rect.left;
     x = Math.max(0, Math.min(x, rect.width));
-    const pct = (x / rect.width) * 100;
-    splitBar.style.left = pct + '%';
-    viewLayerOriginal.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+    setSplitPosition((x / rect.width) * 100);
   });
 
   document.addEventListener('mouseup', () => {
@@ -134,14 +158,24 @@ function initSplitView() {
     const rect = splitView.getBoundingClientRect();
     let x = e.touches[0].clientX - rect.left;
     x = Math.max(0, Math.min(x, rect.width));
-    const pct = (x / rect.width) * 100;
-    splitBar.style.left = pct + '%';
-    viewLayerOriginal.style.clipPath = `inset(0 ${100 - pct}% 0 0)`;
+    setSplitPosition((x / rect.width) * 100);
   });
 
   document.addEventListener('touchend', () => {
     isDragging = false;
   });
+}
+
+function setSplitPosition(pct) {
+  const safePct = Math.max(0, Math.min(pct, 100));
+  splitBar.style.left = safePct + '%';
+  viewLayerOriginal.style.clipPath = `inset(0 ${100 - safePct}% 0 0)`;
+}
+
+function resetSplitView() {
+  splitBar.classList.remove('visible');
+  splitBar.style.left = '50%';
+  viewLayerOriginal.style.clipPath = 'none';
 }
 
 // ─── Mode Switch ────────────────────────────────────────────────────────────
@@ -201,17 +235,19 @@ btnLoadBg.addEventListener('click', () => {
   
   const es = new EventSource(`${API}/load-model/stream?model=${encodeURIComponent(model)}`);
   es.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
+    const msg = readStreamMessage(e);
     if (msg.phase === 'ready') {
       bgState[model] = 'loaded';
       refreshBgStatus();
       es.close();
     } else if (msg.phase === 'error') {
+      showToast(msg.msg || 'Model load failed');
       refreshBgStatus();
       es.close();
     }
   };
   es.onerror = () => {
+    showToast('Model load failed');
     refreshBgStatus();
     es.close();
   };
@@ -224,17 +260,19 @@ btnLoadUp.addEventListener('click', () => {
   
   const es = new EventSource(`${API}/download-upscale/stream?model=${encodeURIComponent(model)}`);
   es.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
+    const msg = readStreamMessage(e);
     if (msg.phase === 'ready') {
       upState[model] = true;
       refreshUpStatus();
       es.close();
     } else if (msg.phase === 'error') {
+      showToast(msg.msg || 'Model download failed');
       refreshUpStatus();
       es.close();
     }
   };
   es.onerror = () => {
+    showToast('Model download failed');
     refreshUpStatus();
     es.close();
   };
@@ -267,29 +305,58 @@ fileInput.addEventListener('change', () => {
   if (fileInput.files[0]) loadFile(fileInput.files[0]);
 });
 
+function revokeObjectUrl(url) {
+  if (url) URL.revokeObjectURL(url);
+}
+
+function clearResult() {
+  resultBlob = null;
+  revokeObjectUrl(resultObjectUrl);
+  resultObjectUrl = null;
+  imgResult.removeAttribute('src');
+  btnDownload.hidden = true;
+}
+
+function cancelActiveProcess() {
+  if (activeProcessController) {
+    activeProcessController.abort();
+    activeProcessController = null;
+  }
+}
+
+function resetProcessingUi() {
+  viewLayerOriginal.classList.remove('processing');
+  btnRun.disabled = !currentFile;
+  btnRun.querySelector('span').textContent = 'Process';
+  topBar.classList.remove('active');
+  loadingLayer.hidden = true;
+}
+
 async function loadFile(file) {
   if (!file.type.startsWith('image/')) {
     showToast('Please select an image file');
     return;
   }
   
+  cancelActiveProcess();
+  currentRunId += 1;
+  resetProcessingUi();
+  clearResult();
+
   currentFile = file;
   
+  revokeObjectUrl(originalObjectUrl);
   const url = URL.createObjectURL(file);
+  originalObjectUrl = url;
   imgOriginal.src = url;
-  imgResult.src = '';
-  resultBlob = null;
   
   // Switch to preview
   emptyState.hidden = true;
   previewStage.hidden = false;
   btnRun.disabled = false;
-  btnDownload.hidden = true;
   
   // Reset to single-image view (no split until result is ready)
-  splitBar.classList.remove('visible');
-  splitBar.style.left = '50%';
-  viewLayerOriginal.style.clipPath = 'none';
+  resetSplitView();
   viewLayerOriginal.classList.remove('processing');
   
   // Update sizer and info
@@ -316,6 +383,16 @@ async function runProcess() {
 
   const bgModel = bgModelSel.value;
   const upModel = upModelSel.value;
+  const fileForRun = currentFile;
+  const modeForRun = currentMode;
+  const runId = currentRunId + 1;
+  currentRunId = runId;
+  cancelActiveProcess();
+  activeProcessController = new AbortController();
+  const { signal } = activeProcessController;
+
+  clearResult();
+  resetSplitView();
 
   btnRun.disabled = true;
   btnRun.querySelector('span').textContent = 'Processing';
@@ -326,36 +403,40 @@ async function runProcess() {
   const startTime = Date.now();
 
   try {
-    let blob = currentFile;
-    if (currentMode === 'rembg') {
-      blob = await callRemoveBg(blob, bgModel);
-    } else if (currentMode === 'upscale') {
-      blob = await callUpscale(blob, upModel);
+    let blob = fileForRun;
+    if (modeForRun === 'rembg') {
+      blob = await callRemoveBg(blob, bgModel, signal);
+    } else if (modeForRun === 'upscale') {
+      blob = await callUpscale(blob, upModel, signal);
     }
 
+    if (runId !== currentRunId || fileForRun !== currentFile || signal.aborted) return;
+
     resultBlob = blob;
-    const resultUrl = URL.createObjectURL(blob);
-    imgResult.src = resultUrl;
+    revokeObjectUrl(resultObjectUrl);
+    resultObjectUrl = URL.createObjectURL(blob);
+    imgResult.src = resultObjectUrl;
     btnDownload.hidden = false;
 
     // Reveal split view
-    viewLayerOriginal.style.clipPath = 'inset(0 50% 0 0)';
+    setSplitPosition(50);
     splitBar.classList.add('visible');
 
     const img = new Image();
     img.onload = () => {
+      if (runId !== currentRunId || fileForRun !== currentFile) return;
       infoDims.textContent = `${imgOriginal.naturalWidth}×${imgOriginal.naturalHeight} → ${img.naturalWidth}×${img.naturalHeight}`;
     };
-    img.src = resultUrl;
+    img.src = resultObjectUrl;
 
-    if (currentMode !== 'upscale') {
-      bgState[bgModel] = 'loaded';
-      refreshBgStatus();
-    }
+    if (modeForRun !== 'upscale') await fetchModels();
   } catch (err) {
+    if (err.name === 'AbortError') return;
     console.error(err);
     showToast(err.message || 'Processing failed');
   } finally {
+    if (runId !== currentRunId) return;
+    activeProcessController = null;
     viewLayerOriginal.classList.remove('processing');
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     infoTime.textContent = `${elapsed}s`;
@@ -367,21 +448,27 @@ async function runProcess() {
   }
 }
 
-async function callRemoveBg(file, model) {
+async function callRemoveBg(file, model, signal) {
   const fd = new FormData();
   fd.append('file', file);
   fd.append('model', model);
-  const r = await fetch(`${API}/remove-bg`, { method: 'POST', body: fd });
-  if (!r.ok) throw new Error((await r.json()).detail || 'Failed');
+  const r = await fetch(`${API}/remove-bg`, { method: 'POST', body: fd, signal });
+  if (!r.ok) {
+    const error = await readJsonResponse(r);
+    throw new Error(error.detail || 'Failed');
+  }
   return r.blob();
 }
 
-async function callUpscale(file, model) {
+async function callUpscale(file, model, signal) {
   const fd = new FormData();
   fd.append('file', file);
   fd.append('model', model);
-  const r = await fetch(`${API}/upscale`, { method: 'POST', body: fd });
-  if (!r.ok) throw new Error((await r.json()).detail || 'Failed');
+  const r = await fetch(`${API}/upscale`, { method: 'POST', body: fd, signal });
+  if (!r.ok) {
+    const error = await readJsonResponse(r);
+    throw new Error(error.detail || 'Failed');
+  }
   return r.blob();
 }
 
@@ -390,10 +477,18 @@ async function callUpscale(file, model) {
 btnDownload.addEventListener('click', () => {
   if (!resultBlob) return;
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(resultBlob);
+  const downloadUrl = URL.createObjectURL(resultBlob);
+  a.href = downloadUrl;
   const base = currentFile ? currentFile.name.replace(/\.[^.]+$/, '') : 'result';
   a.download = `${base}_processed.png`;
   a.click();
+  setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+});
+
+window.addEventListener('beforeunload', () => {
+  cancelActiveProcess();
+  revokeObjectUrl(originalObjectUrl);
+  revokeObjectUrl(resultObjectUrl);
 });
 
 // ─── Toast ──────────────────────────────────────────────────────────────────
